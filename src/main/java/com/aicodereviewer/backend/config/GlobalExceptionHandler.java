@@ -37,6 +37,7 @@ public class GlobalExceptionHandler {
         return buildBody(HttpStatus.INTERNAL_SERVER_ERROR, "Unexpected server error.", null);
     }
 
+
     private ResponseEntity<Map<String, Object>> buildBody(HttpStatus status, String message, String path) {
         Map<String, Object> body = new HashMap<>();
         body.put("timestamp", OffsetDateTime.now().toString());
