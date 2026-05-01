@@ -1,6 +1,8 @@
 package com.aicodereviewer.backend.service;
 
+import com.aicodereviewer.backend.dto.ImproveCodeResponse;
 import com.aicodereviewer.backend.dto.ReviewResponse;
+import com.aicodereviewer.backend.model.CodeChangeSuggestion;
 import com.aicodereviewer.backend.model.Issue;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -26,6 +28,8 @@ import static org.springframework.http.HttpStatus.BAD_REQUEST;
 
 @Service
 public class ReviewService {
+
+    private static final int MAX_IMPROVEMENT_DIFF_CHARS = 24000;
 
     private final RestTemplate restTemplate = new RestTemplate();
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -114,6 +118,91 @@ public class ReviewService {
         }
     }
 
+    public ImproveCodeResponse generateCodeImprovements(String diffText, ReviewResponse analysis) {
+        if (diffText == null || diffText.trim().isEmpty()) {
+            throw new ResponseStatusException(BAD_REQUEST, "Diff text is required to generate code improvements.");
+        }
+
+        if (analysis == null) {
+            throw new ResponseStatusException(BAD_REQUEST, "Analysis data is required before generating code improvements.");
+        }
+
+        if (xaiApiKey == null || xaiApiKey.isBlank()) {
+            throw new ResponseStatusException(BAD_REQUEST, "Missing xAI API key. Set xai.api-key or XAI_API_KEY.");
+        }
+
+        String prompt = """
+                You are a senior software engineer preparing actionable code improvements.
+                Use the following review analysis and diff to propose practical code changes.
+                Return STRICT JSON only (no markdown), matching this schema:
+                {
+                  "summary": "short summary of recommended refactor/fixes",
+                  "changes": [
+                    {
+                      "filePath": "path/to/file.ext or Unknown",
+                      "rationale": "why this change is needed",
+                      "beforeCode": "short code snippet before (or inferred problematic snippet)",
+                      "afterCode": "improved code snippet"
+                    }
+                  ]
+                }
+                Rules:
+                - Keep changes concise and implementable (0-6 items).
+                - Focus on bug fixes, security hardening, quality improvements, and maintainability.
+                - If exact code is uncertain, still provide best-effort realistic before/after snippets.
+
+                Review analysis (JSON):
+                """ + safeJson(analysis) + """
+
+                Diff:
+                """ + shrinkDiffForImprovementPrompt(diffText);
+
+        try {
+            String content = callModelForJsonContent(prompt);
+            JsonNode root = objectMapper.readTree(extractJsonObject(content));
+            return toImproveCodeResponse(root);
+        } catch (HttpStatusCodeException ex) {
+            HttpStatusCode status = ex.getStatusCode();
+            String responseBody = ex.getResponseBodyAsString();
+            if (status.is4xxClientError()) {
+                throw new ResponseStatusException(BAD_REQUEST, "xAI request rejected: " + responseBody, ex);
+            }
+            throw new ResponseStatusException(BAD_GATEWAY, "xAI API error: " + responseBody, ex);
+        } catch (Exception ex) {
+            throw new ResponseStatusException(BAD_GATEWAY, "Failed to parse code improvement response", ex);
+        }
+    }
+
+    private String callModelForJsonContent(String prompt) throws Exception {
+        Map<String, Object> requestBody = Map.of(
+                "model", xaiModel,
+                "temperature", 0.2,
+                "messages", List.of(
+                        Map.of("role", "system", "content", "You are a precise static-analysis PR reviewer."),
+                        Map.of("role", "user", "content", prompt)
+                )
+        );
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(xaiApiKey);
+        headers.setContentType(MediaType.APPLICATION_JSON);
+
+        ResponseEntity<String> response = restTemplate.exchange(
+                xaiApiUrl,
+                HttpMethod.POST,
+                new HttpEntity<>(requestBody, headers),
+                String.class
+        );
+
+        String body = Objects.requireNonNullElse(response.getBody(), "");
+        JsonNode root = objectMapper.readTree(body);
+        String content = root.path("choices").path(0).path("message").path("content").asText();
+        if (content == null || content.isBlank()) {
+            throw new ResponseStatusException(BAD_GATEWAY, "xAI returned an empty response.");
+        }
+        return content;
+    }
+
     private String extractJsonObject(String text) {
         String trimmed = text.trim();
         if (trimmed.startsWith("```")) {
@@ -124,6 +213,44 @@ public class ReviewService {
             }
         }
         return trimmed;
+    }
+
+    private ImproveCodeResponse toImproveCodeResponse(JsonNode node) {
+        String summary = node.path("summary").asText("Suggested code improvements based on the analysis.");
+        List<CodeChangeSuggestion> changes = new ArrayList<>();
+        JsonNode changesNode = node.path("changes");
+        if (changesNode.isArray()) {
+            for (JsonNode item : changesNode) {
+                String filePath = item.path("filePath").asText("Unknown");
+                String rationale = item.path("rationale").asText("Improves code quality and reliability.");
+                String beforeCode = item.path("beforeCode").asText("");
+                String afterCode = item.path("afterCode").asText("");
+                changes.add(new CodeChangeSuggestion(filePath, rationale, beforeCode, afterCode));
+            }
+        }
+        return new ImproveCodeResponse(summary, changes);
+    }
+
+    private String safeJson(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (Exception ignored) {
+            return "{}";
+        }
+    }
+
+    private String shrinkDiffForImprovementPrompt(String diffText) {
+        String trimmed = diffText == null ? "" : diffText.trim();
+        if (trimmed.length() <= MAX_IMPROVEMENT_DIFF_CHARS) {
+            return trimmed;
+        }
+
+        int headLength = MAX_IMPROVEMENT_DIFF_CHARS / 2;
+        int tailLength = MAX_IMPROVEMENT_DIFF_CHARS - headLength;
+        String head = trimmed.substring(0, headLength);
+        String tail = trimmed.substring(trimmed.length() - tailLength);
+
+        return head + "\n\n... [DIFF TRUNCATED FOR TOKEN LIMITS] ...\n\n" + tail;
     }
 
     private ReviewResponse toReviewResponse(JsonNode analysis) {

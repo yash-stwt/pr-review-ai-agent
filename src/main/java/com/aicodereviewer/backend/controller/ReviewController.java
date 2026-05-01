@@ -2,6 +2,8 @@ package com.aicodereviewer.backend.controller;
 
 import com.aicodereviewer.backend.dto.ReviewRequest;
 import com.aicodereviewer.backend.dto.ReviewResponse;
+import com.aicodereviewer.backend.dto.ImproveCodeRequest;
+import com.aicodereviewer.backend.dto.ImproveCodeResponse;
 import com.aicodereviewer.backend.service.ReviewService;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -22,5 +24,10 @@ public class ReviewController {
     @PostMapping("/analyze")
     public ReviewResponse analyze(@Valid @RequestBody ReviewRequest request) {
         return reviewService.analyzeDiff(request.diffText());
+    }
+
+    @PostMapping("/improve-code")
+    public ImproveCodeResponse improveCode(@Valid @RequestBody ImproveCodeRequest request) {
+        return reviewService.generateCodeImprovements(request.diffText(), request.analysis());
     }
 }
