@@ -1,0 +1,4 @@
+target/
+*.class
+.env
+application.properties
