@@ -36,7 +36,6 @@ public class ReviewService {
     private final String xaiApiKey;
     private final String xaiModel;
     private final String xaiApiUrl;
-
     public ReviewService(
             @Value("${xai.api-key}") String xaiApiKey,
             @Value("${xai.model}") String xaiModel,
@@ -62,18 +61,45 @@ public class ReviewService {
         }
 
         String prompt = """
-                You are an expert pull request reviewer.
-                Analyze the following git diff and return STRICT JSON only (no markdown), matching this schema:
+                You are a senior software engineer performing a pull request review.
+                
+                Analyze the given git diff carefully. Focus ONLY on the changes (+/- lines), but consider surrounding context when needed.
+                
+                Return STRICT JSON only. Do NOT include markdown, explanations, or extra text.
+                
+                JSON schema:
                 {
-                  "riskScore": number from 0 to 100,
-                  "bugs": [{"severity":"High|Medium|Low","title":"...","description":"..."}],
-                  "security": [{"severity":"High|Medium|Low","title":"...","description":"..."}],
-                  "quality": [{"severity":"High|Medium|Low","title":"...","description":"..."}],
-                  "improvements": [{"severity":"High|Medium|Low","title":"...","description":"..."}]
+                  "riskScore": number (0-100),
+                  "bugs": [{"severity":"High|Medium|Low","title":"string","description":"string"}],
+                  "security": [{"severity":"High|Medium|Low","title":"string","description":"string"}],
+                  "quality": [{"severity":"High|Medium|Low","title":"string","description":"string"}],
+                  "improvements": [{"severity":"High|Medium|Low","title":"string","description":"string"}]
                 }
-                Keep each list concise (0-5 items each).
-                If no findings exist in a category, return an empty array for that category.
-
+                
+                Rules:
+                - riskScore must reflect overall risk of this PR:
+                  0-20: Safe
+                  21-50: Moderate
+                  51-80: Risky
+                  81-100: Critical
+                
+                - Each issue must:
+                  - Be specific to the diff
+                  - Mention affected logic or pattern
+                  - Avoid generic statements
+                
+                - Prioritize:
+                  1. Bugs (logic errors, null issues, edge cases)
+                  2. Security (auth, data leaks, injection, secrets)
+                  3. Code quality (readability, duplication, bad practices)
+                  4. Improvements (refactoring, optimization)
+                
+                - Limit each category to max 5 items
+                - If no issues, return empty array []
+                
+                - DO NOT hallucinate issues if none exist
+                - DO NOT repeat similar points
+                
                 Diff:
                 """ + diffText;
 
@@ -132,30 +158,59 @@ public class ReviewService {
         }
 
         String prompt = """
-                You are a senior software engineer preparing actionable code improvements.
-                Use the following review analysis and diff to propose practical code changes.
-                Return STRICT JSON only (no markdown), matching this schema:
+                You are a senior software engineer generating precise, actionable code improvements for a pull request.
+                
+                Your task is to convert the provided review analysis and git diff into concrete, minimal, and correct code changes.
+                
+                Return STRICT JSON only. Do NOT include markdown, explanations, or any text outside JSON.
+                
+                JSON schema:
                 {
-                  "summary": "short summary of recommended refactor/fixes",
+                  "summary": "short summary of key improvements",
                   "changes": [
                     {
-                      "filePath": "path/to/file.ext or Unknown",
-                      "rationale": "why this change is needed",
-                      "beforeCode": "short code snippet before (or inferred problematic snippet)",
-                      "afterCode": "improved code snippet"
+                      "filePath": "exact file path from diff or 'Unknown'",
+                      "rationale": "clear and specific reason for the change",
+                      "beforeCode": "relevant problematic snippet from diff or best approximation",
+                      "afterCode": "corrected/improved version of the snippet"
                     }
                   ]
                 }
+                
                 Rules:
-                - Keep changes concise and implementable (0-6 items).
-                - Focus on bug fixes, security hardening, quality improvements, and maintainability.
-                - If exact code is uncertain, still provide best-effort realistic before/after snippets.
-
-                Review analysis (JSON):
+                - Maximum 6 changes. Prefer high-impact fixes over many small ones.
+                - Focus on:
+                  1. Bug fixes (null checks, incorrect logic, edge cases)
+                  2. Security fixes (validation, injection, secrets, auth issues)
+                  3. Code quality (duplication, readability, maintainability)
+                  4. Performance improvements (only if meaningful)
+                
+                - filePath must match a file in the diff when possible.
+                - beforeCode should resemble actual code from the diff (use +/- context).
+                - afterCode must be:
+                  - syntactically correct
+                  - directly usable
+                  - minimal (only show relevant lines)
+                
+                - Avoid generic advice like "improve readability".
+                - Avoid repeating similar changes.
+                - Do NOT invent files or large unrelated code blocks.
+                - If uncertain, make a realistic best-effort assumption.
+                
+                - Ensure JSON is valid and parsable:
+                  - Escape quotes properly
+                  - No trailing commas
+                  - No comments
+                
+                Input Review Analysis (JSON):
                 """ + safeJson(analysis) + """
-
-                Diff:
-                """ + shrinkDiffForImprovementPrompt(diffText);
+                
+                Git Diff:
+                """ + shrinkDiffForImprovementPrompt(diffText) + """
+                
+                IMPORTANT:
+                Output must be valid JSON only and directly parseable.
+                """;
 
         try {
             String content = callModelForJsonContent(prompt);
